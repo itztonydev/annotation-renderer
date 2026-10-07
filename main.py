@@ -34,6 +34,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--colors",
+        type=Path,
+        default=Path("colors.yaml"),
+        help="YAML file containing annotation colors.",
+    )
+
     return parser.parse_args()
 
 
@@ -175,6 +182,7 @@ def main() -> int:
                     convert_dataset(
                         temp_dir,
                         final_output_dir,
+                        args.colors
                     )
                 )
 

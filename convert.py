@@ -5,35 +5,108 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
 
-
-# Yellow in OpenCV BGR format.
-LABEL_COLOR = (0, 255, 255)
 
 POLYGON_THICKNESS = 2
 BOX_THICKNESS = 2
 POLYGON_ALPHA = 0.15
 
 
+def load_colors(
+    colors_file: Path,
+) -> dict[str, tuple[int, int, int]]:
+    """
+    Load label colors from YAML.
+
+    YAML uses normal RGB hex colors:
+
+        Whole: "#0000FF"
+
+    OpenCV uses BGR, so the values are converted here.
+    """
+    if not colors_file.is_file():
+        raise FileNotFoundError(
+            f"Color configuration not found: "
+            f"{colors_file}"
+        )
+
+    with colors_file.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        config = yaml.safe_load(file)
+
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"Color configuration must contain "
+            f"a YAML mapping: {colors_file}"
+        )
+
+    colors = {}
+
+    for label, hex_color in config.items():
+        if not isinstance(label, str):
+            raise ValueError(
+                f"Invalid label in {colors_file}: "
+                f"{label!r}"
+            )
+
+        if not isinstance(hex_color, str):
+            raise ValueError(
+                f"Color for '{label}' must be a "
+                f"hex string, got {hex_color!r}"
+            )
+
+        hex_color = hex_color.strip()
+
+        if hex_color.startswith("#"):
+            hex_color = hex_color[1:]
+
+        if len(hex_color) != 6:
+            raise ValueError(
+                f"Invalid hex color for '{label}': "
+                f"#{hex_color}. Expected #RRGGBB."
+            )
+
+        try:
+            red = int(hex_color[0:2], 16)
+            green = int(hex_color[2:4], 16)
+            blue = int(hex_color[4:6], 16)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid hex color for '{label}': "
+                f"#{hex_color}"
+            ) from exc
+
+        # OpenCV uses BGR rather than RGB.
+        colors[label] = (
+            blue,
+            green,
+            red,
+        )
+
+    return colors
+
+
 def find_annotations(
     dataset_dir: Path,
 ) -> Path:
-    """
-    Find annotations.xml anywhere inside the extracted dataset.
-    """
+    """Find annotations.xml inside the dataset."""
     matches = list(
         dataset_dir.rglob("annotations.xml")
     )
 
     if not matches:
         raise FileNotFoundError(
-            f"annotations.xml not found in {dataset_dir}"
+            f"annotations.xml not found in "
+            f"{dataset_dir}"
         )
 
     if len(matches) > 1:
         raise RuntimeError(
-            f"Multiple annotations.xml files found in "
-            f"{dataset_dir}: {matches}"
+            f"Multiple annotations.xml files found "
+            f"in {dataset_dir}: {matches}"
         )
 
     return matches[0]
@@ -44,22 +117,16 @@ def find_image(
     image_name: str,
 ) -> Path | None:
     """
-    Find the image referenced by the CVAT XML.
+    Find the image referenced by CVAT XML.
 
-    CVAT commonly stores names such as:
-
-        images/image001.jpg
-
-    but the archive may have a slightly different
-    directory structure, so we try both the relative
-    path and the basename.
+    Exact path is preferred. If that doesn't exist,
+    search by filename.
     """
     image_name = image_name.replace(
         "\\",
         "/",
     )
 
-    # First: exact path relative to extracted dataset.
     direct_path = (
         dataset_dir / image_name
     )
@@ -67,29 +134,26 @@ def find_image(
     if direct_path.is_file():
         return direct_path
 
-    # Second: search recursively by filename.
     filename = Path(image_name).name
 
-    matches = list(
+    matches = sorted(
         dataset_dir.rglob(filename)
     )
 
     if not matches:
         return None
 
+    # If there are multiple files with the same
+    # basename, don't guess.
     if len(matches) > 1:
-        # Prefer an image under an "images" directory.
-        image_matches = [
-            path
-            for path in matches
-            if "images" in path.parts
-        ]
-
-        if len(image_matches) == 1:
-            return image_matches[0]
-
-        # Otherwise use the first deterministic result.
-        return sorted(matches)[0]
+        raise RuntimeError(
+            f"Ambiguous image reference "
+            f"'{image_name}'. Found multiple files:\n"
+            + "\n".join(
+                f"  {path}"
+                for path in matches
+            )
+        )
 
     return matches[0]
 
@@ -97,13 +161,7 @@ def find_image(
 def parse_points(
     points_string: str,
 ) -> np.ndarray:
-    """
-    Convert:
-
-        100,200;150,250;200,200
-
-    into an OpenCV integer point array.
-    """
+    """Convert CVAT points into an OpenCV array."""
     points = []
 
     for point in points_string.split(";"):
@@ -123,8 +181,8 @@ def parse_points(
 
     if len(points) < 3:
         raise ValueError(
-            f"Polygon must have at least 3 points: "
-            f"{points_string}"
+            f"Polygon must contain at least "
+            f"3 points: {points_string}"
         )
 
     return np.asarray(
@@ -133,15 +191,55 @@ def parse_points(
     )
 
 
+def get_label_color(
+    element: ET.Element,
+    colors: dict[str, tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    """
+    Get the color for an annotation element.
+
+    The label comes from the CVAT XML:
+        <polygon label="Whole" ...>
+
+    or:
+        <box label="Broken" ...>
+    """
+    label = element.get("label")
+
+    if not label:
+        raise ValueError(
+            "Annotation has no 'label' attribute."
+        )
+
+    if label not in colors:
+        available = ", ".join(
+            sorted(colors.keys())
+        )
+
+        raise ValueError(
+            f"Unknown annotation label: "
+            f"'{label}'. "
+            f"Available labels: {available}"
+        )
+
+    return colors[label]
+
+
 def draw_polygon(
     image: np.ndarray,
     polygon: ET.Element,
+    colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Draw one polygon with transparent fill and border."""
+    """Draw one colored polygon."""
     points_string = polygon.get("points")
 
     if not points_string:
         return image
+
+    color = get_label_color(
+        polygon,
+        colors,
+    )
 
     points = parse_points(
         points_string
@@ -150,11 +248,11 @@ def draw_polygon(
     # Transparent fill.
     overlay = image.copy()
 
-    # cv2.fillPoly(
-    #     overlay,
-    #     [points],
-    #     LABEL_COLOR,
-    # )
+    cv2.fillPoly(
+        overlay,
+        [points],
+        color,
+    )
 
     image = cv2.addWeighted(
         overlay,
@@ -164,12 +262,12 @@ def draw_polygon(
         0,
     )
 
-    # Polygon border.
+    # Solid border.
     cv2.polylines(
         image,
         [points],
         isClosed=True,
-        color=LABEL_COLOR,
+        color=color,
         thickness=POLYGON_THICKNESS,
         lineType=cv2.LINE_AA,
     )
@@ -180,18 +278,32 @@ def draw_polygon(
 def draw_box(
     image: np.ndarray,
     box: ET.Element,
+    colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Draw one CVAT bounding box."""
-    xtl = int(float(box.get("xtl", 0)))
-    ytl = int(float(box.get("ytl", 0)))
-    xbr = int(float(box.get("xbr", 0)))
-    ybr = int(float(box.get("ybr", 0)))
+    """Draw one colored bounding box."""
+    color = get_label_color(
+        box,
+        colors,
+    )
+
+    xtl = int(
+        float(box.get("xtl", 0))
+    )
+    ytl = int(
+        float(box.get("ytl", 0))
+    )
+    xbr = int(
+        float(box.get("xbr", 0))
+    )
+    ybr = int(
+        float(box.get("ybr", 0))
+    )
 
     cv2.rectangle(
         image,
         (xtl, ytl),
         (xbr, ybr),
-        LABEL_COLOR,
+        color,
         BOX_THICKNESS,
     )
 
@@ -201,14 +313,16 @@ def draw_box(
 def annotate_image(
     image: np.ndarray,
     image_element: ET.Element,
+    colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Apply all polygons and boxes for one image."""
+    """Apply all annotations belonging to one image."""
     for polygon in image_element.findall(
         "polygon"
     ):
         image = draw_polygon(
             image,
             polygon,
+            colors,
         )
 
     for box in image_element.findall(
@@ -217,6 +331,7 @@ def annotate_image(
         image = draw_box(
             image,
             box,
+            colors,
         )
 
     return image
@@ -225,6 +340,7 @@ def annotate_image(
 def convert_dataset(
     dataset_dir: Path,
     output_dir: Path,
+    colors_file: Path,
 ) -> tuple[int, int]:
     """
     Convert one extracted dataset.
@@ -236,8 +352,16 @@ def convert_dataset(
         dataset_dir
     )
 
+    colors = load_colors(
+        colors_file
+    )
+
     print(
         f"Annotations: {annotations_path}"
+    )
+
+    print(
+        f"Colors     : {colors_file}"
     )
 
     tree = ET.parse(
@@ -268,10 +392,13 @@ def convert_dataset(
             skipped += 1
             continue
 
-        image_path = find_image(
-            dataset_dir,
-            image_name,
-        )
+        try:
+            image_path = find_image(
+                dataset_dir,
+                image_name,
+            )
+        except RuntimeError:
+            raise
 
         if image_path is None:
             print(
@@ -300,9 +427,9 @@ def convert_dataset(
         image = annotate_image(
             image,
             image_element,
+            colors,
         )
 
-        # Always produce PNG.
         output_name = (
             Path(image_path.name).stem
             + ".png"
@@ -312,8 +439,6 @@ def convert_dataset(
             output_dir / output_name
         )
 
-        # Prevent accidental overwrite if two XML
-        # entries resolve to the same filename.
         if output_path.exists():
             stem = output_path.stem
             suffix = output_path.suffix
