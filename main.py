@@ -1,161 +1,131 @@
+from __future__ import annotations
 
-import os
-import xml.etree.ElementTree as ET
+import argparse
+import sys
+from pathlib import Path
 
-import cv2
-import numpy as np
-
-
-XML_FILE = "annotations.xml"
-IMAGE_DIR = "images"
-OUTPUT_DIR = "annotated"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-tree = ET.parse(XML_FILE)
-root = tree.getroot()
+from convert import convert_dataset
+from extract import extract_input_directory
 
 
-# ---------------------------------------------------------
-# Colors
-# ---------------------------------------------------------
-
-LABEL_COLOR = (0, 255, 255)  # Yellow
-
-
-# ---------------------------------------------------------
-# Process images
-# ---------------------------------------------------------
-
-for image_element in root.findall(".//image"):
-
-    image_name = image_element.get("name")
-
-    filename = os.path.basename(image_name)
-
-    image_path = os.path.join(
-        IMAGE_DIR,
-        filename
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract ZIP/TAR datasets and convert "
+            "their CVAT annotations into annotated PNG images."
+        )
     )
 
-    if not os.path.exists(image_path):
-        print(f"Image not found: {image_path}")
-        continue
-
-    img = cv2.imread(image_path)
-
-    if img is None:
-        print(f"Could not read: {image_path}")
-        continue
-
-    print(f"Processing: {filename}")
-
-
-    # =====================================================
-    # POLYGONS
-    # =====================================================
-
-    for polygon in image_element.findall("polygon"):
-
-        points_string = polygon.get("points")
-
-        points = []
-
-        for point in points_string.split(";"):
-
-            x, y = point.split(",")
-
-            points.append([
-                int(float(x)),
-                int(float(y))
-            ])
-
-        points_array = np.array(
-            points,
-            dtype="int32"
-        )
-
-
-        # -------------------------------------------------
-        # Draw polygon border
-        # -------------------------------------------------
-
-        cv2.polylines(
-            img,
-            [points_array],
-            isClosed=True,
-            color=LABEL_COLOR,
-            thickness=2,
-            lineType=cv2.LINE_AA
-        )
-
-
-        # -------------------------------------------------
-        # Transparent polygon fill
-        # -------------------------------------------------
-
-        overlay = img.copy()
-
-        # cv2.fillPoly(
-        #     overlay,
-        #     [points_array],
-        #     LABEL_COLOR
-        # )
-
-        img = cv2.addWeighted(
-            overlay,
-            0.15,
-            img,
-            0.85,
-            0
-        )
-
-
-    # =====================================================
-    # BOUNDING BOXES
-    # =====================================================
-
-    for box in image_element.findall("box"):
-
-        xtl = int(float(box.get("xtl")))
-        ytl = int(float(box.get("ytl")))
-        xbr = int(float(box.get("xbr")))
-        ybr = int(float(box.get("ybr")))
-
-
-        # -------------------------------------------------
-        # Draw bounding box
-        # -------------------------------------------------
-
-        cv2.rectangle(
-            img,
-            (xtl, ytl),
-            (xbr, ybr),
-            LABEL_COLOR,
-            2
-        )
-
-
-    # =====================================================
-    # SAVE PNG
-    # =====================================================
-
-    output_name = (
-        os.path.splitext(filename)[0]
-        + ".png"
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Directory containing ZIP/TAR files.",
     )
 
-    output_path = os.path.join(
-        OUTPUT_DIR,
-        output_name
+    parser.add_argument(
+        "output",
+        type=Path,
+        help="Directory where processed datasets will be created.",
     )
 
-    cv2.imwrite(
-        output_path,
-        img
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    input_dir = args.input
+    output_dir = args.output
+
+    if not input_dir.exists():
+        print(
+            f"Input directory does not exist: {input_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not input_dir.is_dir():
+        print(
+            f"Input is not a directory: {input_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    print(f"  -> {output_path}")
+    print(f"Input : {input_dir}")
+    print(f"Output: {output_dir}")
+    print()
+
+    # ---------------------------------------------------------
+    # Extract all archives
+    # ---------------------------------------------------------
+    try:
+        datasets = extract_input_directory(
+            input_dir,
+            output_dir,
+        )
+    except Exception as exc:
+        print(
+            f"Extraction failed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not datasets:
+        print("No ZIP/TAR archives found.")
+        return 0
+
+    print()
+
+    # ---------------------------------------------------------
+    # Convert each extracted dataset
+    # ---------------------------------------------------------
+    failed = 0
+
+    for dataset_dir in datasets:
+        print("=" * 60)
+        print(f"Dataset: {dataset_dir.name}")
+        print("=" * 60)
+
+        # Keep extracted files in a temporary subdirectory,
+        # and put the final annotated images in "annotated".
+        annotated_dir = dataset_dir / "annotated"
+
+        try:
+            convert_dataset(
+                dataset_dir,
+                annotated_dir,
+            )
+
+        except Exception as exc:
+            failed += 1
+
+            print(
+                f"Failed: {dataset_dir}"
+            )
+            print(
+                f"Reason: {exc}",
+                file=sys.stderr,
+            )
+
+        print()
+
+    # ---------------------------------------------------------
+    # Summary
+    # ---------------------------------------------------------
+    print("=" * 60)
+    print("Finished.")
+    print(f"Datasets: {len(datasets)}")
+    print(f"Failed  : {failed}")
+    print("=" * 60)
+
+    return 1 if failed else 0
 
 
-print("\nFinished.")
+if __name__ == "__main__":
+    raise SystemExit(main())
+
