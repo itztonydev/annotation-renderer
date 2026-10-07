@@ -150,11 +150,11 @@ def draw_polygon(
     # Transparent fill.
     overlay = image.copy()
 
-    cv2.fillPoly(
-        overlay,
-        [points],
-        LABEL_COLOR,
-    )
+    # cv2.fillPoly(
+    #     overlay,
+    #     [points],
+    #     LABEL_COLOR,
+    # )
 
     image = cv2.addWeighted(
         overlay,
