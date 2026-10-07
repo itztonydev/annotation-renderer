@@ -1,121 +1,110 @@
 from __future__ import annotations
 
-import shutil
 import tarfile
 import zipfile
 from pathlib import Path
 
 
-SUPPORTED_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz"}
-
-
-def is_archive(path: Path) -> bool:
-    """Return True if the path is a supported ZIP/TAR archive."""
-    return path.is_file() and (
-        path.suffix.lower() in SUPPORTED_EXTENSIONS
-        or tarfile.is_tarfile(path)
-        or zipfile.is_zipfile(path)
+def is_supported_archive(path: Path) -> bool:
+    """Check whether a file is a supported ZIP or TAR archive."""
+    return (
+        path.is_file()
+        and (
+            zipfile.is_zipfile(path)
+            or tarfile.is_tarfile(path)
+        )
     )
 
 
-def safe_extract_zip(archive: Path, output_dir: Path) -> None:
-    """Extract ZIP while preventing path traversal."""
-    output_dir = output_dir.resolve()
-
-    with zipfile.ZipFile(archive, "r") as zip_ref:
-        for member in zip_ref.infolist():
-            target = (output_dir / member.filename).resolve()
-
-            if not str(target).startswith(str(output_dir)):
-                raise RuntimeError(
-                    f"Unsafe path in archive: {member.filename}"
-                )
-
-        zip_ref.extractall(output_dir)
-
-
-def safe_extract_tar(archive: Path, output_dir: Path) -> None:
-    """Extract TAR while preventing path traversal."""
-    output_dir = output_dir.resolve()
-
-    with tarfile.open(archive, "r:*") as tar_ref:
-        for member in tar_ref.getmembers():
-            target = (output_dir / member.name).resolve()
-
-            if not str(target).startswith(str(output_dir)):
-                raise RuntimeError(
-                    f"Unsafe path in archive: {member.name}"
-                )
-
-        tar_ref.extractall(output_dir)
-
-
-def extract_archive(archive: Path, output_dir: Path) -> Path:
+def _safe_path(base_dir: Path, member_name: str) -> Path:
     """
-    Extract one archive into output_dir.
-
-    Returns the extraction directory.
+    Prevent archive path traversal such as:
+        ../../some_file
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = base_dir.resolve()
+    target = (base_dir / member_name).resolve()
 
-    if zipfile.is_zipfile(archive):
-        safe_extract_zip(archive, output_dir)
-
-    elif tarfile.is_tarfile(archive):
-        safe_extract_tar(archive, output_dir)
-
-    else:
-        raise ValueError(f"Unsupported archive: {archive}")
-
-    return output_dir
-
-
-def extract_input_directory(
-    input_dir: Path,
-    output_dir: Path,
-) -> list[Path]:
-    """
-    Extract every supported archive from input_dir.
-
-    Each archive gets its own output directory named after
-    the archive filename without its extension.
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    archives = sorted(
-        path
-        for path in input_dir.iterdir()
-        if is_archive(path)
-    )
-
-    extracted_dirs = []
-
-    for archive in archives:
-        archive_name = archive.stem
-
-        # Handle .tar.gz / .tar.bz2 / .tar.xz etc.
-        if archive.name.endswith(".tar.gz"):
-            archive_name = archive.name[:-7]
-        elif archive.name.endswith(".tar.bz2"):
-            archive_name = archive.name[:-8]
-        elif archive.name.endswith(".tar.xz"):
-            archive_name = archive.name[:-7]
-        elif archive.name.endswith(".tgz"):
-            archive_name = archive.name[:-4]
-
-        destination = output_dir / archive_name
-
-        if destination.exists():
-            shutil.rmtree(destination)
-
-        print(f"Extracting: {archive}")
-        print(f"       -> {destination}")
-
-        extract_archive(
-            archive,
-            destination,
+    try:
+        target.relative_to(base_dir)
+    except ValueError:
+        raise RuntimeError(
+            f"Unsafe path in archive: {member_name}"
         )
 
-        extracted_dirs.append(destination)
+    return target
 
-    return extracted_dirs
+
+def extract_zip(
+    archive_path: Path,
+    output_dir: Path,
+) -> None:
+    """Safely extract a ZIP archive."""
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        for member in archive.infolist():
+            _safe_path(
+                output_dir,
+                member.filename,
+            )
+
+        archive.extractall(output_dir)
+
+
+def extract_tar(
+    archive_path: Path,
+    output_dir: Path,
+) -> None:
+    """Safely extract a TAR archive."""
+    with tarfile.open(archive_path, "r:*") as archive:
+        for member in archive.getmembers():
+            _safe_path(
+                output_dir,
+                member.name,
+            )
+
+        archive.extractall(output_dir)
+
+
+def extract_archive(
+    archive_path: Path,
+    output_dir: Path,
+) -> None:
+    """
+    Extract either ZIP or TAR archive into output_dir.
+    """
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if zipfile.is_zipfile(archive_path):
+        extract_zip(
+            archive_path,
+            output_dir,
+        )
+        return
+
+    if tarfile.is_tarfile(archive_path):
+        extract_tar(
+            archive_path,
+            output_dir,
+        )
+        return
+
+    raise ValueError(
+        f"Unsupported archive: {archive_path}"
+    )
+
+
+def find_archives(
+    input_dir: Path,
+) -> list[Path]:
+    """
+    Find ZIP/TAR files directly inside INPUT.
+    """
+    archives = []
+
+    for path in sorted(input_dir.iterdir()):
+        if is_supported_archive(path):
+            archives.append(path)
+
+    return archives

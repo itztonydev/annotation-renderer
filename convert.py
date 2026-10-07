@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -8,32 +7,36 @@ import cv2
 import numpy as np
 
 
-LABEL_COLOR = (0, 255, 255)  # Yellow
+# Yellow in OpenCV BGR format.
+LABEL_COLOR = (0, 255, 255)
+
+POLYGON_THICKNESS = 2
+BOX_THICKNESS = 2
+POLYGON_ALPHA = 0.15
 
 
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
-
-
-def find_annotations_file(dataset_dir: Path) -> Path:
+def find_annotations(
+    dataset_dir: Path,
+) -> Path:
     """
-    Find annotations.xml inside the extracted dataset.
+    Find annotations.xml anywhere inside the extracted dataset.
     """
-    candidates = list(dataset_dir.rglob("annotations.xml"))
+    matches = list(
+        dataset_dir.rglob("annotations.xml")
+    )
 
-    if not candidates:
+    if not matches:
         raise FileNotFoundError(
             f"annotations.xml not found in {dataset_dir}"
         )
 
-    return candidates[0]
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Multiple annotations.xml files found in "
+            f"{dataset_dir}: {matches}"
+        )
+
+    return matches[0]
 
 
 def find_image(
@@ -41,41 +44,74 @@ def find_image(
     image_name: str,
 ) -> Path | None:
     """
-    Locate an image referenced by annotations.xml.
+    Find the image referenced by the CVAT XML.
 
-    First tries the path directly, then searches recursively
-    by filename.
+    CVAT commonly stores names such as:
+
+        images/image001.jpg
+
+    but the archive may have a slightly different
+    directory structure, so we try both the relative
+    path and the basename.
     """
-    image_name = image_name.replace("\\", "/")
+    image_name = image_name.replace(
+        "\\",
+        "/",
+    )
 
-    # Try path relative to dataset root.
-    direct_path = dataset_dir / image_name
+    # First: exact path relative to extracted dataset.
+    direct_path = (
+        dataset_dir / image_name
+    )
 
-    if direct_path.exists():
+    if direct_path.is_file():
         return direct_path
 
-    # Try only the basename.
+    # Second: search recursively by filename.
     filename = Path(image_name).name
 
-    matches = list(dataset_dir.rglob(filename))
+    matches = list(
+        dataset_dir.rglob(filename)
+    )
 
-    if matches:
-        return matches[0]
+    if not matches:
+        return None
 
-    return None
+    if len(matches) > 1:
+        # Prefer an image under an "images" directory.
+        image_matches = [
+            path
+            for path in matches
+            if "images" in path.parts
+        ]
+
+        if len(image_matches) == 1:
+            return image_matches[0]
+
+        # Otherwise use the first deterministic result.
+        return sorted(matches)[0]
+
+    return matches[0]
 
 
-def parse_points(points_string: str) -> np.ndarray:
+def parse_points(
+    points_string: str,
+) -> np.ndarray:
     """
-    Convert CVAT-style polygon points:
+    Convert:
 
-        "100,200;150,250;200,200"
+        100,200;150,250;200,200
 
-    into an OpenCV array.
+    into an OpenCV integer point array.
     """
     points = []
 
     for point in points_string.split(";"):
+        point = point.strip()
+
+        if not point:
+            continue
+
         x, y = point.split(",")
 
         points.append(
@@ -85,110 +121,129 @@ def parse_points(points_string: str) -> np.ndarray:
             ]
         )
 
-    return np.array(
+    if len(points) < 3:
+        raise ValueError(
+            f"Polygon must have at least 3 points: "
+            f"{points_string}"
+        )
+
+    return np.asarray(
         points,
         dtype=np.int32,
     )
 
 
 def draw_polygon(
-    img: np.ndarray,
+    image: np.ndarray,
     polygon: ET.Element,
 ) -> np.ndarray:
+    """Draw one polygon with transparent fill and border."""
     points_string = polygon.get("points")
 
     if not points_string:
-        return img
+        return image
 
-    points_array = parse_points(points_string)
+    points = parse_points(
+        points_string
+    )
 
     # Transparent fill.
-    overlay = img.copy()
+    overlay = image.copy()
 
     cv2.fillPoly(
         overlay,
-        [points_array],
+        [points],
         LABEL_COLOR,
     )
 
-    img = cv2.addWeighted(
+    image = cv2.addWeighted(
         overlay,
-        0.15,
-        img,
-        0.85,
+        POLYGON_ALPHA,
+        image,
+        1.0 - POLYGON_ALPHA,
         0,
     )
 
     # Polygon border.
     cv2.polylines(
-        img,
-        [points_array],
+        image,
+        [points],
         isClosed=True,
         color=LABEL_COLOR,
-        thickness=2,
+        thickness=POLYGON_THICKNESS,
         lineType=cv2.LINE_AA,
     )
 
-    return img
+    return image
 
 
 def draw_box(
-    img: np.ndarray,
+    image: np.ndarray,
     box: ET.Element,
 ) -> np.ndarray:
-    xtl = int(float(box.get("xtl")))
-    ytl = int(float(box.get("ytl")))
-    xbr = int(float(box.get("xbr")))
-    ybr = int(float(box.get("ybr")))
+    """Draw one CVAT bounding box."""
+    xtl = int(float(box.get("xtl", 0)))
+    ytl = int(float(box.get("ytl", 0)))
+    xbr = int(float(box.get("xbr", 0)))
+    ybr = int(float(box.get("ybr", 0)))
 
     cv2.rectangle(
-        img,
+        image,
         (xtl, ytl),
         (xbr, ybr),
         LABEL_COLOR,
-        2,
+        BOX_THICKNESS,
     )
 
-    return img
+    return image
 
 
 def annotate_image(
-    img: np.ndarray,
+    image: np.ndarray,
     image_element: ET.Element,
 ) -> np.ndarray:
-    """
-    Draw all polygons and bounding boxes belonging
-    to one CVAT image element.
-    """
-    for polygon in image_element.findall("polygon"):
-        img = draw_polygon(
-            img,
+    """Apply all polygons and boxes for one image."""
+    for polygon in image_element.findall(
+        "polygon"
+    ):
+        image = draw_polygon(
+            image,
             polygon,
         )
 
-    for box in image_element.findall("box"):
-        img = draw_box(
-            img,
+    for box in image_element.findall(
+        "box"
+    ):
+        image = draw_box(
+            image,
             box,
         )
 
-    return img
+    return image
 
 
 def convert_dataset(
     dataset_dir: Path,
     output_dir: Path,
-) -> None:
+) -> tuple[int, int]:
     """
     Convert one extracted dataset.
 
-    The annotated images are written to output_dir.
+    Returns:
+        (processed_count, skipped_count)
     """
-    annotations_file = find_annotations_file(dataset_dir)
+    annotations_path = find_annotations(
+        dataset_dir
+    )
 
-    print(f"Annotations: {annotations_file}")
+    print(
+        f"Annotations: {annotations_path}"
+    )
 
-    tree = ET.parse(annotations_file)
+    tree = ET.parse(
+        annotations_path
+    )
+
     root = tree.getroot()
 
     output_dir.mkdir(
@@ -199,11 +254,17 @@ def convert_dataset(
     processed = 0
     skipped = 0
 
-    for image_element in root.findall(".//image"):
-        image_name = image_element.get("name")
+    for image_element in root.findall(
+        ".//image"
+    ):
+        image_name = image_element.get(
+            "name"
+        )
 
         if not image_name:
-            print("Skipping image without name")
+            print(
+                "  WARNING: image has no name"
+            )
             skipped += 1
             continue
 
@@ -214,45 +275,67 @@ def convert_dataset(
 
         if image_path is None:
             print(
-                f"Image not found: {image_name}"
+                f"  WARNING: image not found: "
+                f"{image_name}"
             )
             skipped += 1
             continue
 
-        print(f"Processing: {image_path.name}")
+        print(
+            f"  Processing: {image_path.name}"
+        )
 
-        img = cv2.imread(
+        image = cv2.imread(
             str(image_path)
         )
 
-        if img is None:
+        if image is None:
             print(
-                f"Could not read: {image_path}"
+                f"  WARNING: could not read: "
+                f"{image_path}"
             )
             skipped += 1
             continue
 
-        img = annotate_image(
-            img,
+        image = annotate_image(
+            image,
             image_element,
         )
 
-        # Preserve original filename but output as PNG.
+        # Always produce PNG.
         output_name = (
             Path(image_path.name).stem
             + ".png"
         )
 
-        output_path = output_dir / output_name
+        output_path = (
+            output_dir / output_name
+        )
+
+        # Prevent accidental overwrite if two XML
+        # entries resolve to the same filename.
+        if output_path.exists():
+            stem = output_path.stem
+            suffix = output_path.suffix
+
+            counter = 2
+
+            while output_path.exists():
+                output_path = (
+                    output_dir
+                    / f"{stem}_{counter}{suffix}"
+                )
+                counter += 1
 
         success = cv2.imwrite(
             str(output_path),
-            img,
+            image,
         )
 
         if not success:
             print(
-                f"Could not write: {output_path}"
+                f"  WARNING: could not write: "
+                f"{output_path}"
             )
             skipped += 1
             continue
@@ -260,10 +343,7 @@ def convert_dataset(
         processed += 1
 
         print(
-            f"  -> {output_path}"
+            f"       -> {output_path}"
         )
 
-    print(
-        f"Completed: {processed} images, "
-        f"{skipped} skipped"
-    )
+    return processed, skipped
