@@ -17,13 +17,13 @@ def load_colors(
     colors_file: Path,
 ) -> dict[str, tuple[int, int, int]]:
     """
-    Load label colors from YAML.
+    Load condition -> RGB hex colors from YAML.
 
-    YAML uses normal RGB hex colors:
-
+    YAML:
         Whole: "#0000FF"
 
-    OpenCV uses BGR, so the values are converted here.
+    OpenCV internally uses BGR, so colors are
+    converted from RGB -> BGR here.
     """
     if not colors_file.is_file():
         raise FileNotFoundError(
@@ -39,48 +39,46 @@ def load_colors(
 
     if not isinstance(config, dict):
         raise ValueError(
-            f"Color configuration must contain "
-            f"a YAML mapping: {colors_file}"
+            "Color configuration must be a YAML mapping."
         )
 
     colors = {}
 
-    for label, hex_color in config.items():
-        if not isinstance(label, str):
+    for condition, hex_color in config.items():
+        if not isinstance(condition, str):
             raise ValueError(
-                f"Invalid label in {colors_file}: "
-                f"{label!r}"
+                f"Invalid condition: {condition!r}"
             )
 
         if not isinstance(hex_color, str):
             raise ValueError(
-                f"Color for '{label}' must be a "
-                f"hex string, got {hex_color!r}"
+                f"Color for '{condition}' must be "
+                f"a hex string."
             )
 
-        hex_color = hex_color.strip()
+        value = hex_color.strip()
 
-        if hex_color.startswith("#"):
-            hex_color = hex_color[1:]
+        if value.startswith("#"):
+            value = value[1:]
 
-        if len(hex_color) != 6:
+        if len(value) != 6:
             raise ValueError(
-                f"Invalid hex color for '{label}': "
-                f"#{hex_color}. Expected #RRGGBB."
+                f"Invalid color for '{condition}': "
+                f"#{value}. Expected #RRGGBB."
             )
 
         try:
-            red = int(hex_color[0:2], 16)
-            green = int(hex_color[2:4], 16)
-            blue = int(hex_color[4:6], 16)
+            red = int(value[0:2], 16)
+            green = int(value[2:4], 16)
+            blue = int(value[4:6], 16)
         except ValueError as exc:
             raise ValueError(
-                f"Invalid hex color for '{label}': "
-                f"#{hex_color}"
+                f"Invalid hex color for "
+                f"'{condition}': #{value}"
             ) from exc
 
-        # OpenCV uses BGR rather than RGB.
-        colors[label] = (
+        # RGB -> OpenCV BGR
+        colors[condition] = (
             blue,
             green,
             red,
@@ -89,10 +87,79 @@ def load_colors(
     return colors
 
 
+def get_condition(
+    annotation: ET.Element,
+) -> str:
+    """
+    Extract the Condition attribute from an
+    annotation.
+
+    Example XML:
+
+        <polygon label="Rice">
+            <attribute name="Condition">
+                Whole
+            </attribute>
+        </polygon>
+    """
+    for attribute in annotation.findall(
+        "attribute"
+    ):
+        name = attribute.get("name")
+
+        if name == "Condition":
+            value = attribute.text
+
+            if value is None:
+                raise ValueError(
+                    "Condition attribute is empty."
+                )
+
+            value = value.strip()
+
+            if not value:
+                raise ValueError(
+                    "Condition attribute is empty."
+                )
+
+            return value
+
+    raise ValueError(
+        f"Annotation does not contain a "
+        f"'Condition' attribute. "
+        f"Label: {annotation.get('label')!r}"
+    )
+
+
+def get_annotation_color(
+    annotation: ET.Element,
+    colors: dict[str, tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    """
+    Get annotation color based on Condition,
+    NOT the object label.
+    """
+    condition = get_condition(
+        annotation
+    )
+
+    if condition not in colors:
+        available = ", ".join(
+            sorted(colors.keys())
+        )
+
+        raise ValueError(
+            f"Unknown condition: "
+            f"'{condition}'. "
+            f"Available conditions: {available}"
+        )
+
+    return colors[condition]
+
+
 def find_annotations(
     dataset_dir: Path,
 ) -> Path:
-    """Find annotations.xml inside the dataset."""
     matches = list(
         dataset_dir.rglob("annotations.xml")
     )
@@ -118,9 +185,6 @@ def find_image(
 ) -> Path | None:
     """
     Find the image referenced by CVAT XML.
-
-    Exact path is preferred. If that doesn't exist,
-    search by filename.
     """
     image_name = image_name.replace(
         "\\",
@@ -143,8 +207,6 @@ def find_image(
     if not matches:
         return None
 
-    # If there are multiple files with the same
-    # basename, don't guess.
     if len(matches) > 1:
         raise RuntimeError(
             f"Ambiguous image reference "
@@ -161,7 +223,6 @@ def find_image(
 def parse_points(
     points_string: str,
 ) -> np.ndarray:
-    """Convert CVAT points into an OpenCV array."""
     points = []
 
     for point in points_string.split(";"):
@@ -181,8 +242,8 @@ def parse_points(
 
     if len(points) < 3:
         raise ValueError(
-            f"Polygon must contain at least "
-            f"3 points: {points_string}"
+            f"Polygon must have at least 3 points: "
+            f"{points_string}"
         )
 
     return np.asarray(
@@ -191,52 +252,20 @@ def parse_points(
     )
 
 
-def get_label_color(
-    element: ET.Element,
-    colors: dict[str, tuple[int, int, int]],
-) -> tuple[int, int, int]:
-    """
-    Get the color for an annotation element.
-
-    The label comes from the CVAT XML:
-        <polygon label="Whole" ...>
-
-    or:
-        <box label="Broken" ...>
-    """
-    label = element.get("label")
-
-    if not label:
-        raise ValueError(
-            "Annotation has no 'label' attribute."
-        )
-
-    if label not in colors:
-        available = ", ".join(
-            sorted(colors.keys())
-        )
-
-        raise ValueError(
-            f"Unknown annotation label: "
-            f"'{label}'. "
-            f"Available labels: {available}"
-        )
-
-    return colors[label]
-
-
 def draw_polygon(
     image: np.ndarray,
     polygon: ET.Element,
     colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Draw one colored polygon."""
+    """
+    Draw polygon using its Condition color.
+    """
     points_string = polygon.get("points")
 
     if not points_string:
         return image
 
-    color = get_label_color(
+    color = get_annotation_color(
         polygon,
         colors,
     )
@@ -262,7 +291,7 @@ def draw_polygon(
         0,
     )
 
-    # Solid border.
+    # Colored border.
     cv2.polylines(
         image,
         [points],
@@ -280,8 +309,10 @@ def draw_box(
     box: ET.Element,
     colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Draw one colored bounding box."""
-    color = get_label_color(
+    """
+    Draw bounding box using its Condition color.
+    """
+    color = get_annotation_color(
         box,
         colors,
     )
@@ -315,7 +346,12 @@ def annotate_image(
     image_element: ET.Element,
     colors: dict[str, tuple[int, int, int]],
 ) -> np.ndarray:
-    """Apply all annotations belonging to one image."""
+    """
+    Apply all polygon and box annotations.
+
+    Color is determined by:
+        annotation -> Condition -> colors.yaml
+    """
     for polygon in image_element.findall(
         "polygon"
     ):
@@ -344,9 +380,6 @@ def convert_dataset(
 ) -> tuple[int, int]:
     """
     Convert one extracted dataset.
-
-    Returns:
-        (processed_count, skipped_count)
     """
     annotations_path = find_annotations(
         dataset_dir
@@ -387,29 +420,26 @@ def convert_dataset(
 
         if not image_name:
             print(
-                "  WARNING: image has no name"
+                "WARNING: image has no name"
             )
             skipped += 1
             continue
 
-        try:
-            image_path = find_image(
-                dataset_dir,
-                image_name,
-            )
-        except RuntimeError:
-            raise
+        image_path = find_image(
+            dataset_dir,
+            image_name,
+        )
 
         if image_path is None:
             print(
-                f"  WARNING: image not found: "
+                f"WARNING: image not found: "
                 f"{image_name}"
             )
             skipped += 1
             continue
 
         print(
-            f"  Processing: {image_path.name}"
+            f"Processing: {image_path.name}"
         )
 
         image = cv2.imread(
@@ -418,7 +448,7 @@ def convert_dataset(
 
         if image is None:
             print(
-                f"  WARNING: could not read: "
+                f"WARNING: could not read: "
                 f"{image_path}"
             )
             skipped += 1
@@ -459,7 +489,7 @@ def convert_dataset(
 
         if not success:
             print(
-                f"  WARNING: could not write: "
+                f"WARNING: could not write: "
                 f"{output_path}"
             )
             skipped += 1
@@ -468,7 +498,7 @@ def convert_dataset(
         processed += 1
 
         print(
-            f"       -> {output_path}"
+            f"  -> {output_path}"
         )
 
     return processed, skipped
