@@ -1,4 +1,4 @@
-# CVAT Chawal
+# Annotation Renderer
 
 `main.py` extracts CVAT dataset archives and creates PNG images with colored annotations. It reads the `Condition` attribute in each annotation. It does not use the CVAT object label to select a color.
 
