@@ -277,11 +277,11 @@ def draw_polygon(
     # Transparent fill.
     overlay = image.copy()
 
-    cv2.fillPoly(
-        overlay,
-        [points],
-        color,
-    )
+    # cv2.fillPoly(
+    #     overlay,
+    #     [points],
+    #     color,
+    # )
 
     image = cv2.addWeighted(
         overlay,
