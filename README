@@ -1,0 +1,53 @@
+# CVAT Chawal
+
+`main.py` extracts CVAT dataset archives and creates PNG images with colored annotations. It reads the `Condition` attribute in each annotation. It does not use the CVAT object label to select a color.
+
+## Requirements
+
+Use Python 3.12 or later. Install the project dependencies with your normal Python package tool. The project needs NumPy, OpenCV, and PyYAML.
+
+## Run
+
+Run the command from this directory:
+
+```sh
+python main.py INPUT_DIRECTORY OUTPUT_DIRECTORY
+```
+
+`INPUT_DIRECTORY` must be a directory. Put ZIP or TAR archives directly in this directory. `OUTPUT_DIRECTORY` is created if it does not exist.
+
+Example:
+
+```sh
+python main.py ./archives ./output
+```
+
+For each archive, the tool extracts the data to a temporary directory. It finds `annotations.xml`, finds the images that the XML names, and writes the annotated PNG images to `OUTPUT_DIRECTORY/ARCHIVE_NAME`.
+
+If an output directory for an archive already exists, the tool replaces it. Do not use an output directory that contains files you need to keep.
+
+## Colors
+
+By default, the tool reads `colors.yaml`. Use `--colors` to select a different YAML file:
+
+```sh
+python main.py ./archives ./output --colors ./my-colors.yaml
+```
+
+The default color map is:
+
+| Condition | Color |
+| --- | --- |
+| Foreign Matter | Red |
+| Whole | Green |
+| Damaged | Blue |
+| Chalky | Purple |
+| Broken | Yellow |
+| Discoloured | Pink |
+| Dehusked | Brown |
+
+The condition text in the YAML file must match the `Condition` attribute text in `annotations.xml`.
+
+## Results and errors
+
+The tool prints the number of archives, images created, images skipped, and failed archives. It returns exit code `1` if an archive fails. It returns `0` when processing completes, including when it finds no archives.
